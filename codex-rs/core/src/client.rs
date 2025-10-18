@@ -680,6 +680,12 @@ async fn process_sse<S>(
     // The response id returned from the "complete" message.
     let mut response_completed: Option<ResponseCompleted> = None;
     let mut response_error: Option<CodexErr> = None;
+    // Some providers (e.g., certain OpenRouter models) do not emit
+    // `response.output_item.done` for assistant messages and only include the
+    // final assistant message inside the `response.completed.response.output`
+    // array. Track whether we've seen an assistant message item so we can fall
+    // back to parsing the final message from `response.completed` when needed.
+    let mut saw_assistant_message_item = false;
 
     loop {
         let start = std::time::Instant::now();
@@ -782,12 +788,27 @@ async fn process_sse<S>(
                     continue;
                 };
 
+                if let ResponseItem::Message { role, .. } = &item
+                    && role == "assistant" {
+                        saw_assistant_message_item = true;
+                    }
+
                 let event = ResponseEvent::OutputItemDone(item);
                 if tx_event.send(Ok(event)).await.is_err() {
                     return;
                 }
             }
             "response.output_text.delta" => {
+                if let Some(delta) = event.delta {
+                    let event = ResponseEvent::OutputTextDelta(delta);
+                    if tx_event.send(Ok(event)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            // Some providers alias output_text deltas under a different name.
+            // Accept these as text deltas to preserve streaming in the UI.
+            "response.message.delta" | "message.delta" => {
                 if let Some(delta) = event.delta {
                     let event = ResponseEvent::OutputTextDelta(delta);
                     if tx_event.send(Ok(event)).await.is_err() {
@@ -848,6 +869,51 @@ async fn process_sse<S>(
             // Final response completed – includes array of output items & id
             "response.completed" => {
                 if let Some(resp_val) = event.response {
+                    // Fallback: some providers only include the assistant message inside the
+                    // `response.output` array and never emit an incremental
+                    // `response.output_item.done` for it. If we haven't seen an assistant message
+                    // item yet, attempt to extract and forward any message items found here so the
+                    // UI displays the final assistant text.
+                    if !saw_assistant_message_item
+                        && let Some(outputs) = resp_val
+                            .get("output")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                        {
+                            for val in outputs {
+                                let is_message = val
+                                    .get("type")
+                                    .and_then(|v| v.as_str())
+                                    .map(|t| t == "message")
+                                    .unwrap_or(false);
+                                if !is_message {
+                                    continue;
+                                }
+
+                                let parsed = serde_json::from_value::<ResponseItem>(val);
+                                match parsed {
+                                    Ok(item) => {
+                                        if let ResponseItem::Message { role, .. } = &item
+                                            && role == "assistant" {
+                                                if tx_event
+                                                    .send(Ok(ResponseEvent::OutputItemDone(item)))
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    return;
+                                                }
+                                                saw_assistant_message_item = true;
+                                            }
+                                    }
+                                    Err(e) => {
+                                        debug!(
+                                            "failed to parse message from response.completed output: {e}"
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
                     match serde_json::from_value::<ResponseCompleted>(resp_val) {
                         Ok(r) => {
                             response_completed = Some(r);
