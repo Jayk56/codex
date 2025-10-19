@@ -550,6 +550,37 @@ async fn process_chat_sse<S>(
                 }
             }
 
+            // Some providers include the final assistant content only on the
+            // terminal message object (no per‑token deltas). Capture it so we
+            // can emit a final assistant message on `finish_reason = stop`.
+            if assistant_text.is_empty() {
+                if let Some(message_obj) = choice.get("message") {
+                    // Accept either a plain string or an array of parts with `{ type: "text", text }`.
+                    if let Some(s) = message_obj
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        assistant_text.push_str(s);
+                    } else if let Some(parts) =
+                        message_obj.get("content").and_then(|v| v.as_array())
+                    {
+                        let mut buf = String::new();
+                        for part in parts {
+                            if let Some(t) = part.get("type").and_then(|v| v.as_str())
+                                && t == "text"
+                                && let Some(s) = part.get("text").and_then(|v| v.as_str())
+                            {
+                                buf.push_str(s);
+                            }
+                        }
+                        if !buf.is_empty() {
+                            assistant_text.push_str(&buf);
+                        }
+                    }
+                }
+            }
+
             // Handle streaming function / tool calls.
             if let Some(tool_calls) = choice
                 .get("delta")
