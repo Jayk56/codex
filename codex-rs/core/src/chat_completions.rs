@@ -645,36 +645,37 @@ async fn process_chat_sse<S>(
                             // 1) New schema: tool_calls: [{ id, type: "function", function: { name, arguments } }]
                             if let Some(tool_calls) =
                                 message_obj.get("tool_calls").and_then(|v| v.as_array())
-                                && let Some(tc) = tool_calls.first()
                             {
-                                let call_id = tc
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string)
-                                    .unwrap_or_default();
-                                if let Some(function) =
-                                    tc.get("function").and_then(|v| v.as_object())
-                                {
-                                    let name = function
-                                        .get("name")
+                                for tc in tool_calls {
+                                    let call_id = tc
+                                        .get("id")
                                         .and_then(|v| v.as_str())
                                         .map(str::to_string)
                                         .unwrap_or_default();
-                                    let arguments = function
-                                        .get("arguments")
-                                        .and_then(|v| v.as_str())
-                                        .map(str::to_string)
-                                        .unwrap_or_default();
+                                    if let Some(function) =
+                                        tc.get("function").and_then(|v| v.as_object())
+                                    {
+                                        let name = function
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .map(str::to_string)
+                                            .unwrap_or_default();
+                                        let arguments = function
+                                            .get("arguments")
+                                            .and_then(|v| v.as_str())
+                                            .map(str::to_string)
+                                            .unwrap_or_default();
 
-                                    let item = ResponseItem::FunctionCall {
-                                        id: None,
-                                        name,
-                                        arguments,
-                                        call_id,
-                                    };
-                                    let _ = tx_event
-                                        .send(Ok(ResponseEvent::OutputItemDone(item)))
-                                        .await;
+                                        let item = ResponseItem::FunctionCall {
+                                            id: None,
+                                            name,
+                                            arguments,
+                                            call_id: call_id.clone(),
+                                        };
+                                        let _ = tx_event
+                                            .send(Ok(ResponseEvent::OutputItemDone(item)))
+                                            .await;
+                                    }
                                 }
                             // 2) Legacy schema: function_call: { name, arguments }
                             } else if let Some(function_call) =
