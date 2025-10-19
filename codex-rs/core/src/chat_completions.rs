@@ -637,6 +637,71 @@ async fn process_chat_sse<S>(
 
                         let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
                     }
+                    "tool_calls" => {
+                        // Fallback: some providers only include tool calls on the final
+                        // message object (no per-token `delta.tool_calls`). Parse the
+                        // function call from `choices[0].message`.
+                        if let Some(message_obj) = choice.get("message") {
+                            // 1) New schema: tool_calls: [{ id, type: "function", function: { name, arguments } }]
+                            if let Some(tool_calls) =
+                                message_obj.get("tool_calls").and_then(|v| v.as_array())
+                                && let Some(tc) = tool_calls.first()
+                            {
+                                let call_id = tc
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .unwrap_or_default();
+                                if let Some(function) =
+                                    tc.get("function").and_then(|v| v.as_object())
+                                {
+                                    let name = function
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .map(str::to_string)
+                                        .unwrap_or_default();
+                                    let arguments = function
+                                        .get("arguments")
+                                        .and_then(|v| v.as_str())
+                                        .map(str::to_string)
+                                        .unwrap_or_default();
+
+                                    let item = ResponseItem::FunctionCall {
+                                        id: None,
+                                        name,
+                                        arguments,
+                                        call_id,
+                                    };
+                                    let _ = tx_event
+                                        .send(Ok(ResponseEvent::OutputItemDone(item)))
+                                        .await;
+                                }
+                            // 2) Legacy schema: function_call: { name, arguments }
+                            } else if let Some(function_call) =
+                                message_obj.get("function_call").and_then(|v| v.as_object())
+                            {
+                                let name = function_call
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .unwrap_or_default();
+                                let arguments = function_call
+                                    .get("arguments")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .unwrap_or_default();
+
+                                let item = ResponseItem::FunctionCall {
+                                    id: None,
+                                    name,
+                                    arguments,
+                                    call_id: String::new(),
+                                };
+                                let _ =
+                                    tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
+                            }
+                        }
+                    }
                     "stop" => {
                         // Regular turn without tool-call. Emit the final assistant message
                         // as a single OutputItemDone so non-delta consumers see the result.
